@@ -1,4 +1,4 @@
-name: Build Release APK from uploaded ZIP
+name: Build APK from uploaded ZIP
 
 on:
   workflow_dispatch:
@@ -59,7 +59,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Validate release secrets
+      - name: Detect build mode
+        id: mode
         shell: bash
         run: |
           set -euo pipefail
@@ -67,23 +68,28 @@ jobs:
           for name in SIGNING_KEYSTORE_BASE64 SIGNING_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD BAZAAR_RSA_PUBLIC_KEY BAZAAR_PURCHASE_PRODUCT_ID; do
             value="${!name:-}"
             if [ -z "$value" ]; then
-              echo "Missing required GitHub secret: $name"
+              echo "Missing optional release secret: $name"
               missing=1
             fi
           done
-          if [ "$missing" -ne 0 ]; then
-            echo "Add the required secrets in Settings > Secrets and variables > Actions, then run this workflow again."
-            exit 1
+          if [ "$missing" -eq 0 ]; then
+            echo "build_type=release" >> "$GITHUB_OUTPUT"
+            echo "All release secrets are present. A signed release APK will be built."
+          else
+            echo "build_type=debug" >> "$GITHUB_OUTPUT"
+            echo "Release secrets are missing. A debug APK will be built for testing only."
           fi
 
       - name: Decode release keystore
+        if: steps.mode.outputs.build_type == 'release'
         shell: bash
         run: |
           set -euo pipefail
           printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 --decode > project/release.keystore
           test -s project/release.keystore
 
-      - name: Create local.properties
+      - name: Create release local.properties
+        if: steps.mode.outputs.build_type == 'release'
         shell: bash
         run: |
           set -euo pipefail
@@ -96,7 +102,19 @@ jobs:
           SIGNING_KEY_PASSWORD=$SIGNING_KEY_PASSWORD
           EOF
           sed -i 's/^ *//' project/local.properties
-          echo "local.properties created."
+          echo "release local.properties created."
+
+      - name: Create debug local.properties
+        if: steps.mode.outputs.build_type == 'debug'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > project/local.properties <<EOF
+          BAZAAR_RSA_PUBLIC_KEY=DEBUG_MISSING_BAZAAR_RSA_PUBLIC_KEY
+          BAZAAR_PURCHASE_PRODUCT_ID=bmi_branches_lifetime
+          EOF
+          sed -i 's/^ *//' project/local.properties
+          echo "debug local.properties created."
 
       - name: Make Gradle executable
         shell: bash
@@ -107,6 +125,7 @@ jobs:
           fi
 
       - name: Build release APK
+        if: steps.mode.outputs.build_type == 'release'
         working-directory: project
         shell: bash
         run: |
@@ -117,9 +136,30 @@ jobs:
             gradle assembleRelease
           fi
 
+      - name: Build debug APK
+        if: steps.mode.outputs.build_type == 'debug'
+        working-directory: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f ./gradlew ]; then
+            ./gradlew assembleDebug
+          else
+            gradle assembleDebug
+          fi
+
       - name: Upload release APK artifact
+        if: steps.mode.outputs.build_type == 'release'
         uses: actions/upload-artifact@v4
         with:
           name: bmi14-release-apk
           path: project/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload debug APK artifact
+        if: steps.mode.outputs.build_type == 'debug'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bmi14-debug-apk-testing-only
+          path: project/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
